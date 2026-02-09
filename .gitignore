@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+wheels/
+.venv/
+
+# uv lock file
+uv.lock
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Project - 큰 파일/결과물은 Git에 안 올림
+outputs/
+data/images/*
+!data/images/.gitkeep
+
+# Jupyter
+.ipynb_checkpoints/

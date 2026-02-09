@@ -1,0 +1,12 @@
+[project]
+name = "cv-app"
+version = "0.1.0"
+description = "OpenCV Computer Vision Portfolio"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "opencv-python",
+    "numpy",
+    "pillow",
+    "matplotlib",
+]
