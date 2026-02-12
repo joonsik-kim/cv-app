@@ -70,8 +70,12 @@ def measure_fillet(cropped_image, board_ref_lab):
     """
     Cropped(ROI) 이미지에서 솔더 필렛 영역을 추출하고 면적을 계측한다.
 
-    OG에서 추출한 기판 기준색과의 Lab 색공간 거리를 계산하여
-    기판과 다른 영역 = 솔더 필렛으로 판별한다.
+    3단계 파이프라인:
+    1. 기판 제거: OG 기준색과의 Lab Color Distance → Otsu 이진화
+    2. 바디 제거: 어두운 픽셀 (V < threshold) 제거
+    3. 필렛 분리: 파란색(급경사=필렛 엣지) 기반으로 필렛 영역만 추출
+       - 파란색 픽셀 찾기 → 팽창 → 인접 주황/빨강도 포함
+       - 랜드는 파란색이 없으므로 자동 제외
 
     Args:
         cropped_image: BGR 이미지 (numpy array)
@@ -79,47 +83,65 @@ def measure_fillet(cropped_image, board_ref_lab):
 
     Returns:
         dict: {
-            'mask': 이진 마스크 (필렛=255, 기판=0),
+            'mask': 이진 마스크 (필렛=255, 나머지=0),
             'distance_map': 정규화된 거리맵 (0-255),
+            'blue_mask': 파란색(급경사) 검출 마스크 (디버깅용),
             'area_pixels': 필렛 면적 (픽셀),
             'area_mm2': 필렛 면적 (mm²),
         }
     """
     PIXEL_SIZE_MM = 0.01465
 
-    # 1. Lab 변환 + 거리 계산
+    # === Stage 1: 기판 제거 (Lab Color Distance) ===
     lab = cv2.cvtColor(cropped_image, cv2.COLOR_BGR2Lab).astype(np.float64)
     diff = lab - board_ref_lab
     distance = np.sqrt(np.sum(diff ** 2, axis=2)).astype(np.float32)
-
-    # 2. 정규화 + Otsu 이진화
     dist_norm = cv2.normalize(distance, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    _, binary = cv2.threshold(dist_norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # 3. 모폴로지 노이즈 제거
+    _, non_board = cv2.threshold(dist_norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # === Stage 2: 바디 제거 (어두운 영역) ===
+    hsv = cv2.cvtColor(cropped_image, cv2.COLOR_BGR2HSV)
+    h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+
+    not_dark = (v >= 40).astype(np.uint8) * 255
+
+    # === Stage 3: 필렛 분리 (파란색 기반) ===
+    # 파란색 = 급경사 = 필렛의 고유 특징 (Hue 85-130)
+    blue_mask = cv2.inRange(hsv, np.array([85, 20, 40]), np.array([130, 255, 255]))
+
+    # 파란색 영역을 팽창시켜 인접한 필렛 표면(주황/빨강)까지 포함
+    dilate_kernel = np.ones((7, 7), np.uint8)
+    blue_expanded = cv2.dilate(blue_mask, dilate_kernel, iterations=2)
+
+    # 최종 필렛 마스크 = 기판아님 AND 바디아님 AND (파란색 OR 파란색 근처)
+    fillet_mask = cv2.bitwise_and(non_board, not_dark)
+    fillet_mask = cv2.bitwise_and(fillet_mask, blue_expanded)
+
+    # 노이즈 제거
     kernel = np.ones((3, 3), np.uint8)
-    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    fillet_mask = cv2.morphologyEx(fillet_mask, cv2.MORPH_OPEN, kernel)
+    fillet_mask = cv2.morphologyEx(fillet_mask, cv2.MORPH_CLOSE, kernel)
 
-    # 4. 컨투어 기반 면적 계산
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    mask = np.zeros_like(binary)
+    # 면적 계산
+    contours, _ = cv2.findContours(fillet_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     area_pixels = 0
+    clean_mask = np.zeros_like(fillet_mask)
 
     if contours:
-        # 모든 의미있는 컨투어 포함 (작은 노이즈만 제거)
-        min_area = max(5, binary.size * 0.005)  # 전체의 0.5% 이상
+        min_area = max(3, fillet_mask.size * 0.003)
         for c in contours:
             a = cv2.contourArea(c)
             if a >= min_area:
-                cv2.drawContours(mask, [c], -1, 255, cv2.FILLED)
+                cv2.drawContours(clean_mask, [c], -1, 255, cv2.FILLED)
                 area_pixels += int(a)
 
     area_mm2 = area_pixels * (PIXEL_SIZE_MM ** 2)
 
     return {
-        'mask': mask,
+        'mask': clean_mask,
         'distance_map': dist_norm,
+        'blue_mask': blue_mask,
         'area_pixels': area_pixels,
         'area_mm2': round(area_mm2, 6),
     }
@@ -144,8 +166,8 @@ def visualize_part_results(part_name, og_image, board_mask, board_ref_lab,
     """
     n_crops = len(cropped_images)
     n_rows = 1 + n_crops
-    n_cols = 4
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(14, 3 * n_rows))
+    n_cols = 5
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(17, 3 * n_rows))
 
     if n_rows == 1:
         axes = axes.reshape(1, -1)
@@ -173,6 +195,7 @@ def visualize_part_results(part_name, og_image, board_mask, board_ref_lab,
                     fontsize=11, transform=axes[0, 2].transAxes)
     axes[0, 2].axis('off')
     axes[0, 3].axis('off')
+    axes[0, 4].axis('off')
 
     # --- Row 1+: 각 Cropped 결과 ---
     for i, ((fname, crop_img), result) in enumerate(zip(cropped_images, results)):
@@ -184,23 +207,28 @@ def visualize_part_results(part_name, og_image, board_mask, board_ref_lab,
         axes[row, 0].set_title(f'{fname}', fontsize=9)
         axes[row, 0].axis('off')
 
-        # Distance Map
+        # Distance Map (기판과의 거리)
         axes[row, 1].imshow(result['distance_map'], cmap='hot')
-        axes[row, 1].set_title('Distance Map', fontsize=9)
+        axes[row, 1].set_title('Board Distance', fontsize=9)
         axes[row, 1].axis('off')
 
-        # 필렛 마스크
-        axes[row, 2].imshow(result['mask'], cmap='gray')
-        axes[row, 2].set_title(f"Fillet: {result['area_pixels']} px | {result['area_mm2']:.4f} mm²",
-                               fontsize=9)
+        # Blue mask (급경사 = 필렛 엣지)
+        axes[row, 2].imshow(result['blue_mask'], cmap='Blues')
+        axes[row, 2].set_title('Blue (steep)', fontsize=9)
         axes[row, 2].axis('off')
+
+        # 필렛 마스크
+        axes[row, 3].imshow(result['mask'], cmap='gray')
+        axes[row, 3].set_title(f"Fillet: {result['area_pixels']} px\n{result['area_mm2']:.4f} mm²",
+                               fontsize=9)
+        axes[row, 3].axis('off')
 
         # 오버레이
         overlay = crop_rgb.copy()
         overlay[result['mask'] > 0] = [0, 255, 0]
-        axes[row, 3].imshow(overlay)
-        axes[row, 3].set_title('Overlay', fontsize=9)
-        axes[row, 3].axis('off')
+        axes[row, 4].imshow(overlay)
+        axes[row, 4].set_title('Overlay', fontsize=9)
+        axes[row, 4].axis('off')
 
     plt.tight_layout()
 
