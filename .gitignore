@@ -24,6 +24,7 @@ Thumbs.db
 # Project - 큰 파일/결과물은 Git에 안 올림
 outputs/
 data/images/*
+data/imgae_processing/
 !data/images/.gitkeep
 
 # Jupyter
