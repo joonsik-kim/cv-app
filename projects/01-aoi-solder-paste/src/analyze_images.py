@@ -84,7 +84,9 @@ class SolderSegmentation:
         Returns:
             mask: 이진 마스크 (솔더=255, 기판=0)
         """
-        hsv = cv2.cvtColor(self.image, cv2.COLOR_BGR2HSV)
+        # GaussianBlur 전처리 → Hue 노이즈 감소, Otsu 안정성 향상
+        blurred = cv2.GaussianBlur(self.image, (5, 5), 0)
+        hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
         h_channel = hsv[:, :, 0]
 
         # Otsu 자동 이진화 (기판 Hue vs 솔더 Hue 자동 분리)
