@@ -1,12 +1,45 @@
 [project]
 name = "cv-app"
 version = "0.1.0"
-description = "OpenCV Computer Vision Portfolio"
+description = "Computer Vision Portfolio Hub with Agent Teams"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "opencv-python",
-    "numpy",
-    "pillow",
-    "matplotlib",
+    "opencv-python>=4.10.0",
+    "numpy>=1.26.0",
+    "pillow>=10.0.0",
+    "matplotlib>=3.8.0",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "black>=24.0.0",
+    "ruff>=0.3.0",
+    "jupyter>=1.0.0",
+]
+
+ml = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+]
+
+api = [
+    "fastapi>=0.109.0",
+    "uvicorn>=0.27.0",
+    "pydantic>=2.6.0",
+    "python-multipart>=0.0.9",
+]
+
+edge = [
+    "onnx>=1.15.0",
+    "onnxruntime>=1.17.0",
+    "opencv-python-headless>=4.10.0",
+]
+
+edge-gpu = [
+    "onnxruntime-gpu>=1.17.0",
+]
+
+[tool.uv.workspace]
+members = ["projects/*", "shared", "agent-system", "api", "edge"]
