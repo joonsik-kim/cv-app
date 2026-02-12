@@ -74,31 +74,48 @@ class SolderSegmentation:
         self.results['method1_exclude_board'] = solder_mask
         return solder_mask
 
-    def method2_hsv_blob(self):
+    def method2_color_distance(self, border_width=2):
         """
-        방법 2: HSV Hue 채널 + Otsu 자동 이진화 + 최대 컨투어 ⭐ 추천
+        방법 2: Color Distance (Lab 색공간) ⭐ 추천
 
-        HSV에서 기판(청록)과 솔더(비-청록)의 Hue 차이가 뚜렷함.
-        Otsu로 자동 임계값 → 가장 큰 덩어리 = 솔더.
+        이미지 테두리 픽셀 = 기판 → 기판 기준색 자동 추출
+        모든 픽셀과 기판 기준색의 Lab 색공간 거리 계산
+        거리가 큰 픽셀 = 솔더 (부품 종류에 관계없이 자동 적응)
+
+        Args:
+            border_width: 기판 기준색 추출에 사용할 테두리 폭 (픽셀)
 
         Returns:
             mask: 이진 마스크 (솔더=255, 기판=0)
         """
-        # GaussianBlur 전처리 → Hue 노이즈 감소, Otsu 안정성 향상
-        blurred = cv2.GaussianBlur(self.image, (5, 5), 0)
-        hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
-        h_channel = hsv[:, :, 0]
+        # 1. Lab 색공간 변환
+        lab = cv2.cvtColor(self.image, cv2.COLOR_BGR2Lab)
 
-        # Otsu 자동 이진화 (기판 Hue vs 솔더 Hue 자동 분리)
-        _, binary = cv2.threshold(h_channel, 0, 255,
-                                  cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        # 2. 오른쪽 모서리에서 기판 기준색 추출 (ROI: 왼쪽=부품, 오른쪽=기판)
+        w = self.width
+        bw = min(border_width, w // 4)
+
+        board_pixels = lab[:, -bw:].reshape(-1, 3).astype(np.float64)
+
+        # 중앙값 = 기판 기준색 (이상치에 강건)
+        board_ref = np.median(board_pixels, axis=0)
+
+        # 3. 모든 픽셀과 기판 기준색의 유클리드 거리 계산
+        lab_float = lab.astype(np.float64)
+        diff = lab_float - board_ref
+        distance_map = np.sqrt(np.sum(diff ** 2, axis=2)).astype(np.float32)
+
+        # 4. Otsu 자동 이진화 (거리가 큰 픽셀 = 솔더)
+        dist_norm = cv2.normalize(distance_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        _, binary = cv2.threshold(dist_norm, 0, 255,
+                                  cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
         # 노이즈 제거
         kernel = np.ones((3, 3), np.uint8)
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
 
-        # 가장 큰 컨투어만 남기기 = 솔더 덩어리
+        # 5. 가장 큰 컨투어만 남기기 = 솔더 덩어리
         contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL,
                                         cv2.CHAIN_APPROX_SIMPLE)
         mask = np.zeros_like(binary)
@@ -106,8 +123,8 @@ class SolderSegmentation:
             largest = max(contours, key=cv2.contourArea)
             cv2.drawContours(mask, [largest], -1, 255, cv2.FILLED)
 
-        self.results['method2_hsv_blob'] = mask
-        self.results['method2_hue_channel'] = h_channel
+        self.results['method2_color_distance'] = mask
+        self.results['method2_distance_map'] = dist_norm
         return mask
 
     def method3_kmeans(self, k=2):
@@ -202,10 +219,10 @@ class SolderSegmentation:
         axes[0, 1].set_title('HSV Color Space')
         axes[0, 1].axis('off')
 
-        # Hue 채널
-        if 'method2_hue_channel' in self.results:
-            axes[0, 2].imshow(self.results['method2_hue_channel'], cmap='hsv')
-            axes[0, 2].set_title('Hue Channel')
+        # Distance Map
+        if 'method2_distance_map' in self.results:
+            axes[0, 2].imshow(self.results['method2_distance_map'], cmap='hot')
+            axes[0, 2].set_title('Color Distance Map')
             axes[0, 2].axis('off')
 
         # 빈 공간
@@ -221,12 +238,12 @@ class SolderSegmentation:
                                  f'{area1["total_mm2"]:.4f} mm²')
             axes[1, 0].axis('off')
 
-        # 방법 2: HSV Blob
-        if 'method2_hsv_blob' in self.results:
-            mask2 = self.results['method2_hsv_blob']
+        # 방법 2: Color Distance
+        if 'method2_color_distance' in self.results:
+            mask2 = self.results['method2_color_distance']
             area2 = self.calculate_area(mask2)
             axes[1, 1].imshow(mask2, cmap='gray')
-            axes[1, 1].set_title(f'Method 2: HSV Blob\n'
+            axes[1, 1].set_title(f'Method 2: Color Distance\n'
                                  f'{area2["total_pixels"]} px | '
                                  f'{area2["total_mm2"]:.4f} mm²')
             axes[1, 1].axis('off')
@@ -242,9 +259,9 @@ class SolderSegmentation:
             axes[1, 2].axis('off')
 
         # 오버레이 (Method 2 기준 - 가장 적합)
-        if 'method2_hsv_blob' in self.results:
+        if 'method2_color_distance' in self.results:
             overlay = rgb_image.copy()
-            mask = self.results['method2_hsv_blob']
+            mask = self.results['method2_color_distance']
             overlay[mask > 0] = [0, 255, 0]
             axes[1, 3].imshow(overlay)
             axes[1, 3].set_title('Method 2 Overlay')
@@ -288,7 +305,7 @@ def analyze_all_images(image_dir, output_dir):
 
             # 3가지 방법 실행
             seg.method1_exclude_board()
-            seg.method2_hsv_blob()
+            seg.method2_color_distance()
             seg.method3_kmeans()
 
             # 결과 시각화 및 저장
