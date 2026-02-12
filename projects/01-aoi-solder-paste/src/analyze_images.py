@@ -1,8 +1,13 @@
 """
 AOI 솔더 페이스트 이미지 분석 스크립트
 
-이 스크립트는 Height Map (False Color) 이미지에서
+OMRON AOI 장비의 경사도 기반 False Color 이미지에서
 솔더 페이스트 영역을 추출하기 위한 3가지 방법을 테스트합니다.
+
+색상 인코딩:
+- 🔴 빨강: 평탄한 부분 (낮은 경사)
+- 🟢 녹색: 중간 경사 (측면 + 기판)
+- 🔵 파랑: 급경사 (가장자리)
 """
 
 import cv2
@@ -28,85 +33,87 @@ class SolderSegmentation:
         self.height, self.width = self.image.shape[:2]
         self.results = {}
 
-    def method1_hsv_color(self, lower_hue=0, upper_hue=30,
-                          lower_sat=100, upper_sat=255,
-                          lower_val=100, upper_val=255):
+    def method1_exclude_board(self, board_lower_hue=35, board_upper_hue=95,
+                              board_lower_sat=30, board_upper_sat=255,
+                              board_lower_val=30, board_upper_val=255):
         """
-        방법 1: HSV 색공간에서 빨강-오렌지 범위 추출
+        방법 1: 기판(녹색 계열) 제외 → 나머지 = 솔더
 
-        빨강/오렌지 = 높은 부분 = 솔더 페이스트
-        파랑/검정 = 낮은 부분 = 기판
+        경사도 색상 인코딩:
+        - 🔴 빨강: 평탄 (솔더 상면 + 기판 평탄면)
+        - 🟢 녹색/청록: 중간 경사 (기판 영역)
+        - 🔵 파랑: 급경사 (솔더 가장자리)
+
+        전략: 기판의 진녹색~청록색 영역을 찾아서 제외
 
         Args:
-            lower_hue: Hue 최소값 (0-179)
-            upper_hue: Hue 최대값 (0-179)
-            lower_sat: Saturation 최소값 (0-255)
-            upper_sat: Saturation 최대값 (0-255)
-            lower_val: Value 최소값 (0-255)
-            upper_val: Value 최대값 (0-255)
+            board_lower_hue: 기판 Hue 최소값 (기본 35)
+            board_upper_hue: 기판 Hue 최대값 (기본 95)
+            board_lower_sat: 기판 Saturation 최소값 (기본 30)
+            board_upper_sat: 기판 Saturation 최대값 (기본 255)
+            board_lower_val: 기판 Value 최소값 (기본 30)
+            board_upper_val: 기판 Value 최대값 (기본 255)
 
         Returns:
-            mask: 이진 마스크 (솔더=255, 배경=0)
+            mask: 이진 마스크 (솔더=255, 기판=0)
         """
-        # BGR → HSV 변환
         hsv = cv2.cvtColor(self.image, cv2.COLOR_BGR2HSV)
 
-        # 빨강-오렌지 범위 정의
-        lower = np.array([lower_hue, lower_sat, lower_val])
-        upper = np.array([upper_hue, upper_sat, upper_val])
+        # 기판 색상 범위 (녹색~청록)
+        lower_board = np.array([board_lower_hue, board_lower_sat, board_lower_val])
+        upper_board = np.array([board_upper_hue, board_upper_sat, board_upper_val])
 
-        # 마스크 생성
-        mask = cv2.inRange(hsv, lower, upper)
+        # 기판 마스크 → 반전 = 솔더
+        board_mask = cv2.inRange(hsv, lower_board, upper_board)
+        solder_mask = cv2.bitwise_not(board_mask)
 
-        # 노이즈 제거 (Opening: 침식 → 팽창)
         kernel = np.ones((3, 3), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        solder_mask = cv2.morphologyEx(solder_mask, cv2.MORPH_OPEN, kernel)
+        solder_mask = cv2.morphologyEx(solder_mask, cv2.MORPH_CLOSE, kernel)
 
-        # 구멍 메우기 (Closing: 팽창 → 침식)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        self.results['method1_exclude_board'] = solder_mask
+        return solder_mask
 
-        self.results['method1_hsv'] = mask
-        return mask
-
-    def method2_channel_diff(self, threshold=30):
+    def method2_hsv_blob(self):
         """
-        방법 2: R-B 채널 차이로 높이 분리
+        방법 2: HSV Hue 채널 + Otsu 자동 이진화 + 최대 컨투어 ⭐ 추천
 
-        높은 부분(솔더): R(빨강) 채널 값이 높음
-        낮은 부분(기판): B(파랑) 채널 값이 높음
-        → R - B 차이가 크면 솔더
-
-        Args:
-            threshold: 임계값 (기본 30)
+        HSV에서 기판(청록)과 솔더(비-청록)의 Hue 차이가 뚜렷함.
+        Otsu로 자동 임계값 → 가장 큰 덩어리 = 솔더.
 
         Returns:
-            mask: 이진 마스크
+            mask: 이진 마스크 (솔더=255, 기판=0)
         """
-        # BGR 채널 분리
-        b, g, r = cv2.split(self.image)
+        hsv = cv2.cvtColor(self.image, cv2.COLOR_BGR2HSV)
+        h_channel = hsv[:, :, 0]
 
-        # R - B 차이 계산
-        diff = r.astype(np.int16) - b.astype(np.int16)
-        diff = np.clip(diff, 0, 255).astype(np.uint8)
-
-        # 임계값으로 이진화
-        _, mask = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
+        # Otsu 자동 이진화 (기판 Hue vs 솔더 Hue 자동 분리)
+        _, binary = cv2.threshold(h_channel, 0, 255,
+                                  cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
         # 노이즈 제거
         kernel = np.ones((3, 3), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
 
-        self.results['method2_channel_diff'] = mask
-        self.results['method2_diff_image'] = diff
+        # 가장 큰 컨투어만 남기기 = 솔더 덩어리
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL,
+                                        cv2.CHAIN_APPROX_SIMPLE)
+        mask = np.zeros_like(binary)
+        if contours:
+            largest = max(contours, key=cv2.contourArea)
+            cv2.drawContours(mask, [largest], -1, 255, cv2.FILLED)
+
+        self.results['method2_hsv_blob'] = mask
+        self.results['method2_hue_channel'] = h_channel
         return mask
 
     def method3_kmeans(self, k=2):
         """
         방법 3: K-means 클러스터링으로 자동 분류
 
-        픽셀을 RGB 좌표로 표현하여 k개 그룹으로 분류
-        가장 밝은(빨강 계열) 클러스터 = 솔더
+        픽셀을 BGR 좌표로 표현하여 k개 그룹으로 분류
+        B 채널이 가장 높은 클러스터 = 솔더 (급경사 = 파랑)
 
         Args:
             k: 클러스터 개수 (기본 2: 솔더 vs 기판)
@@ -114,22 +121,17 @@ class SolderSegmentation:
         Returns:
             mask: 이진 마스크
         """
-        # 이미지를 1D 배열로 변환 (H*W, 3)
         pixels = self.image.reshape((-1, 3)).astype(np.float32)
 
-        # K-means 클러스터링
         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
         _, labels, centers = cv2.kmeans(pixels, k, None, criteria, 10,
                                          cv2.KMEANS_PP_CENTERS)
 
-        # 클러스터 중심의 밝기(R 채널 값) 계산
-        brightness = centers[:, 2]  # BGR이므로 R은 인덱스 2
+        # B - R 차이가 가장 큰 클러스터 = 솔더
+        blue_dominance = centers[:, 0] - centers[:, 2]  # BGR: B=0, R=2
+        solder_cluster = np.argmax(blue_dominance)
 
-        # 가장 밝은 클러스터 찾기
-        brightest_cluster = np.argmax(brightness)
-
-        # 해당 클러스터에 속하는 픽셀만 선택
-        mask = (labels.flatten() == brightest_cluster).astype(np.uint8) * 255
+        mask = (labels.flatten() == solder_cluster).astype(np.uint8) * 255
         mask = mask.reshape((self.height, self.width))
 
         # 노이즈 제거
@@ -198,31 +200,31 @@ class SolderSegmentation:
         axes[0, 1].set_title('HSV Color Space')
         axes[0, 1].axis('off')
 
-        # R-B 차이 이미지
-        if 'method2_diff_image' in self.results:
-            axes[0, 2].imshow(self.results['method2_diff_image'], cmap='hot')
-            axes[0, 2].set_title('R - B Channel Diff')
+        # Hue 채널
+        if 'method2_hue_channel' in self.results:
+            axes[0, 2].imshow(self.results['method2_hue_channel'], cmap='hsv')
+            axes[0, 2].set_title('Hue Channel')
             axes[0, 2].axis('off')
 
         # 빈 공간
         axes[0, 3].axis('off')
 
-        # 방법 1: HSV
-        if 'method1_hsv' in self.results:
-            mask1 = self.results['method1_hsv']
+        # 방법 1: 기판 제외
+        if 'method1_exclude_board' in self.results:
+            mask1 = self.results['method1_exclude_board']
             area1 = self.calculate_area(mask1)
             axes[1, 0].imshow(mask1, cmap='gray')
-            axes[1, 0].set_title(f'Method 1: HSV\n'
+            axes[1, 0].set_title(f'Method 1: Exclude Board\n'
                                  f'{area1["total_pixels"]} px | '
                                  f'{area1["total_mm2"]:.4f} mm²')
             axes[1, 0].axis('off')
 
-        # 방법 2: R-B
-        if 'method2_channel_diff' in self.results:
-            mask2 = self.results['method2_channel_diff']
+        # 방법 2: HSV Blob
+        if 'method2_hsv_blob' in self.results:
+            mask2 = self.results['method2_hsv_blob']
             area2 = self.calculate_area(mask2)
             axes[1, 1].imshow(mask2, cmap='gray')
-            axes[1, 1].set_title(f'Method 2: R-B Diff\n'
+            axes[1, 1].set_title(f'Method 2: HSV Blob\n'
                                  f'{area2["total_pixels"]} px | '
                                  f'{area2["total_mm2"]:.4f} mm²')
             axes[1, 1].axis('off')
@@ -237,13 +239,13 @@ class SolderSegmentation:
                                  f'{area3["total_mm2"]:.4f} mm²')
             axes[1, 2].axis('off')
 
-        # 오버레이 (가장 좋은 방법)
-        if 'method1_hsv' in self.results:
+        # 오버레이 (Method 2 기준 - 가장 적합)
+        if 'method2_hsv_blob' in self.results:
             overlay = rgb_image.copy()
-            mask = self.results['method1_hsv']
-            overlay[mask > 0] = [0, 255, 0]  # 녹색
+            mask = self.results['method2_hsv_blob']
+            overlay[mask > 0] = [0, 255, 0]
             axes[1, 3].imshow(overlay)
-            axes[1, 3].set_title('Method 1 Overlay')
+            axes[1, 3].set_title('Method 2 Overlay')
             axes[1, 3].axis('off')
 
         plt.tight_layout()
@@ -283,8 +285,8 @@ def analyze_all_images(image_dir, output_dir):
             seg = SolderSegmentation(img_path)
 
             # 3가지 방법 실행
-            seg.method1_hsv_color()
-            seg.method2_channel_diff()
+            seg.method1_exclude_board()
+            seg.method2_hsv_blob()
             seg.method3_kmeans()
 
             # 결과 시각화 및 저장
