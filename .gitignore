@@ -25,7 +25,17 @@ Thumbs.db
 outputs/
 data/images/*
 data/imgae_processing/
+data/922R25-07830730/
 !data/images/.gitkeep
+
+# 데이터 이미지/바이너리 (코드만 추적, 이미지는 제외)
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tiff
+*.bundle
+data/*/results/
 
 # Jupyter
 .ipynb_checkpoints/
